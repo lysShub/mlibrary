@@ -1,49 +1,81 @@
-//go:build windows
-// +build windows
-
 // winnt.h
 package mlibrary
 
 import (
 	"debug/pe"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
-type WORD uint16
-type DWORD uint32
-type LONG int32
-type size_t uint64
-type BOOL int
-type ULONG_PTR uint64
-type ptrdiff_t int64
-type UINT_PTR uint64
-type uintptr_t uint64
-type INT_PTR int64
-type FARPROC *func() INT_PTR
-type SIZE_T ULONG_PTR
-
-// TODO:
-//
-//	所有C中的 void* 都映射为unsafe.Pointer
-type LPVOID = unsafe.Pointer
+const (
+	IMAGE_DOS_SIGNATURE      = 0x5A4D
+	IMAGE_NT_SIGNATURE       = 0x00004550
+	HOST_MACHINE             = 0x8664
+	IMAGE_SCN_MEM_NOT_CACHED = 0x04000000
+)
 
 type (
+	CHAR      = byte
+	WORD      = uint16
+	DWORD     = uint32
+	LONG      = int32
+	BOOL      = int32
+	ptrdiff_t = int64
+	INT_PTR   = int64
+	size_t    = uint64
+	ULONG_PTR = uint64
+	UINT_PTR  = uint64
+	uintptr_t = uint64
+	ULONGLONG = uint64
+	SIZE_T    = uint64
+
+	FARPROC       = *func() INT_PTR
+	LPCSTR        = *CHAR
+	PVOID         = unsafe.Pointer
+	LPVOID        = unsafe.Pointer
 	HMEMORYMODULE = unsafe.Pointer
 	HMEMORYRSRC   = unsafe.Pointer
 	HCUSTOMMODULE = unsafe.Pointer
 )
 
-type (
-	LPCSTR unsafe.Pointer
-)
+type IMAGE_IMPORT_BY_NAME struct {
+	Hint WORD
+	Name [1]BYTE
+}
 
-const (
-	IMAGE_DOS_SIGNATURE = 0x5A4D
+type SECTIONFINALIZEDATA struct {
+	address         LPVOID
+	alignedAddress  LPVOID
+	size            SIZE_T
+	characteristics DWORD
+	last            BOOL
+}
 
-	IMAGE_NT_SIGNATURE = 0x00004550 // PE00
+type IMAGE_TLS_DIRECTORY struct {
+	StartAddressOfRawData ULONGLONG
+	EndAddressOfRawData   ULONGLONG
+	AddressOfIndex        ULONGLONG
+	AddressOfCallBacks    ULONGLONG
+	SizeOfZeroFill        DWORD
+	characteristics       DWORD
+}
 
-	HOST_MACHINE = pe.IMAGE_FILE_MACHINE_AMD64
-)
+type IMAGE_TLS_CALLBACK func(DllHandle PVOID, Reason DWORD, Reserved PVOID)
+type PIMAGE_TLS_CALLBACK = *IMAGE_TLS_CALLBACK
+
+var ProtectionFlags = [2][2][2]DWORD{
+	{
+		// not executable
+		{windows.PAGE_NOACCESS, windows.PAGE_WRITECOPY},
+		{windows.PAGE_READONLY, windows.PAGE_READWRITE},
+	},
+	{
+		// executable
+		{windows.PAGE_EXECUTE, windows.PAGE_EXECUTE_WRITECOPY},
+		{windows.PAGE_EXECUTE_READ, windows.PAGE_EXECUTE_READWRITE},
+	},
+}
 
 // DOS .EXE header
 type IMAGE_DOS_HEADER struct {
@@ -92,7 +124,7 @@ type ExportNameEntry struct {
 type MLIBRARY struct {
 	headers          *IMAGE_NT_HEADERS
 	codeBase         *uint8
-	modules          unsafe.Pointer
+	modules          *HCUSTOMMODULE
 	numModules       int32
 	initialized      BOOL
 	isDLL            BOOL
@@ -109,6 +141,11 @@ type MLIBRARY struct {
 	blockMemory      *POINTER_LIST
 }
 
+type HINSTANCE_ struct {
+	unused int32
+}
+type HINSTANCE = *HINSTANCE_
+
 // #define IMAGE_FIRST_SECTION( ntheader ) ((PIMAGE_SECTION_HEADER)
 //
 //	((ULONG_PTR)(ntheader) +
@@ -123,6 +160,24 @@ func IMAGE_FIRST_SECTION(ntheader *IMAGE_NT_HEADERS) *IMAGE_SECTION_HEADER {
 func _FIELD_OFFSET_IMAGE_NT_HEADERS_OptionalHeader() ULONG_PTR {
 	var tmp = IMAGE_NT_HEADERS{}
 	return to[ULONG_PTR](&tmp.OptionalHeader) - to[ULONG_PTR](&tmp)
+}
+
+func IMAGE_SNAP_BY_ORDINAL(Ordinal uintptr_t) bool {
+	return IMAGE_SNAP_BY_ORDINAL64(Ordinal)
+}
+
+const IMAGE_ORDINAL_FLAG64 = uint64(0x8000000000000000)
+
+func IMAGE_SNAP_BY_ORDINAL64(Ordinal uintptr_t) bool {
+	return Ordinal&IMAGE_ORDINAL_FLAG64 != 0
+}
+
+func IMAGE_ORDINAL(Ordinal uintptr_t) uintptr_t {
+	return IMAGE_ORDINAL64(Ordinal)
+}
+
+func IMAGE_ORDINAL64(Ordinal uintptr_t) uintptr_t {
+	return Ordinal & uint64(0xffff)
 }
 
 type IMAGE_IMPORT_DESCRIPTOR = pe.ImportDirectory
