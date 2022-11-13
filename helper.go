@@ -1,7 +1,6 @@
 package mlibrary
 
 import (
-	"debug/pe"
 	"reflect"
 	"syscall"
 	"unsafe"
@@ -23,29 +22,30 @@ const (
 const GMEM_MOVEABLE = 0x0002
 
 // typedef LPVOID (*CustomAllocFunc)(LPVOID, SIZE_T, DWORD, DWORD, void*);
-type CustomAllocFunc *func(LPVOID, SIZE_T, DWORD, DWORD) (LPVOID, error)
+type CustomAllocFunc *func(LPVOID, SIZE_T, DWORD, DWORD, PVOID) (LPVOID, error)
 
 // typedef BOOL (*CustomFreeFunc)(LPVOID, SIZE_T, DWORD, void*);
-type CustomFreeFunc *func(LPVOID, SIZE_T, DWORD) (BOOL, error)
+type CustomFreeFunc *func(LPVOID, SIZE_T, DWORD, PVOID) (BOOL, error)
 
 // typedef HCUSTOMMODULE (*CustomLoadLibraryFunc)(LPCSTR, void *);
-type CustomLoadLibraryFunc *func(LPCSTR) (HCUSTOMMODULE, error)
+type CustomLoadLibraryFunc *func(LPCSTR, PVOID) (HCUSTOMMODULE, error)
 
 // typedef FARPROC (*CustomGetProcAddressFunc)(HCUSTOMMODULE, LPCSTR, void *);
-type CustomGetProcAddressFunc *func(HCUSTOMMODULE, LPCSTR) (FARPROC, error)
+type CustomGetProcAddressFunc *func(HCUSTOMMODULE, LPCSTR, PVOID) (FARPROC, error)
 
 // typedef void (*CustomFreeLibraryFunc)(HCUSTOMMODULE, void *);
-type CustomFreeLibraryFunc *func(HCUSTOMMODULE) error
+type CustomFreeLibraryFunc *func(HCUSTOMMODULE, PVOID) error
 
 type BYTE = byte
 
 type Literal interface {
-	LPVOID | uintptr | uint64 | uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MLIBRARY | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK
+	LPVOID | uintptr | uint64 | uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MLIBRARY | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK | DllEntryProc | ExeEntryProc
 }
 
-// TAG: here!!!!!!!!!!!!!!!!!!!!!!
 // typedef BOOL(WINAPI *DllEntryProc)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
-type DllEntryProc func(hinstDLL HINSTANCE, fdwReson DWORD, lpReserved LPVOID) BOOL
+type DllEntryProc *func(hinstDLL HINSTANCE, fdwReson DWORD, lpReserved LPVOID) BOOL
+
+type ExeEntryProc *func() int
 
 func to[T Literal](v any) T {
 	var typ = *(*uint8)(unsafe.Add(*(*unsafe.Pointer)(unsafe.Pointer(&v)), _typeOffset)) & _typeMask
@@ -60,18 +60,22 @@ func to[T Literal](v any) T {
 	}
 }
 
-func add[T Literal](v T, delta int) T {
+type Number interface {
+	int | uintptr | uint64 | uint32 | int32
+}
+
+func add[T Literal, N Number](v T, delta N) T {
 	var p = unsafe.Add(*(*unsafe.Pointer)(unsafe.Pointer(&v)), delta)
 	return *(*T)(unsafe.Pointer(&p))
 }
 
-func memcpy(ptr1, ptr2 unsafe.Pointer, size int) {
+func memcpy(dst, src unsafe.Pointer, size int) {
 	var s1 = struct {
 		array unsafe.Pointer
 		len   int
 		cap   int
 	}{
-		array: ptr1,
+		array: dst,
 		len:   size,
 		cap:   size,
 	}
@@ -80,35 +84,11 @@ func memcpy(ptr1, ptr2 unsafe.Pointer, size int) {
 		len   int
 		cap   int
 	}{
-		array: ptr2,
+		array: src,
 		len:   size,
 		cap:   size,
 	}
 	copy(to[[]byte](s1), to[[]byte](s2))
-}
-
-func AlignValueUp(value, alignment size_t) size_t {
-	return (value + alignment - 1) & (^(alignment - 1))
-}
-
-func AlignValueDown(value uintptr_t, alignment uintptr_t) uintptr_t {
-	return value & (^(alignment - 1))
-}
-
-func AlignAddressDown(address LPVOID, alignment uintptr_t) LPVOID {
-	return to[LPVOID](AlignValueDown(to[uintptr_t](address), alignment))
-}
-
-func GetRealSectionSize(module *MLIBRARY, section *IMAGE_SECTION_HEADER) SIZE_T {
-	var size DWORD = section.Size
-	if size == 0 {
-		if section.Characteristics&pe.IMAGE_SCN_CNT_INITIALIZED_DATA == uint32(TRUE) {
-			size = module.headers.OptionalHeader.SizeOfInitializedData
-		} else if section.Characteristics&pe.IMAGE_SCN_CNT_UNINITIALIZED_DATA == uint32(TRUE) {
-			size = module.headers.OptionalHeader.SizeOfUninitializedData
-		}
-	}
-	return to[SIZE_T](size)
 }
 
 func errnoErr(e syscall.Errno) error {
@@ -120,13 +100,6 @@ func errnoErr(e syscall.Errno) error {
 	default:
 		return e
 	}
-}
-
-func CheckSize(size, exprcted size_t) bool {
-	if size < exprcted {
-		return false
-	}
-	return true
 }
 
 var modkernel32 = windows.NewLazySystemDLL("kernel32.dll")
@@ -146,10 +119,7 @@ func HeapAlloc(hHeap windows.Handle, dwFlags DWORD, dwBytes size_t) (p uintptr, 
 
 func IsBadReadPtr(lp unsafe.Pointer, ucb UINT_PTR) bool {
 	r0, _, _ := syscall.SyscallN(procIsBadReadPtr.Addr(), uintptr(lp), uintptr(ucb))
-	if r0 == 0 {
-		return false
-	}
-	return true
+	return r0 != 0 // 0:false  1:true
 }
 
 func GetProcessHeap() windows.Handle {
@@ -165,7 +135,7 @@ func realloc(ptr unsafe.Pointer, newSize size_t) (unsafe.Pointer, error) {
 	if r0 == 0 {
 		return nil, errnoErr(e1)
 	}
-	return unsafe.Pointer(r0), nil
+	return to[unsafe.Pointer](r0), nil
 }
 
 func LoadLibraryA(libname string) (handle windows.Handle, err error) {

@@ -4,8 +4,6 @@ package mlibrary
 import (
 	"debug/pe"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -13,6 +11,8 @@ const (
 	IMAGE_NT_SIGNATURE       = 0x00004550
 	HOST_MACHINE             = 0x8664
 	IMAGE_SCN_MEM_NOT_CACHED = 0x04000000
+	IMAGE_SIZEOF_SHORT_NAME  = 8
+	DLL_PROCESS_ATTACH       = 1
 )
 
 type (
@@ -21,6 +21,7 @@ type (
 	DWORD     = uint32
 	LONG      = int32
 	BOOL      = int32
+	UINT      = uint32
 	ptrdiff_t = int64
 	INT_PTR   = int64
 	size_t    = uint64
@@ -32,6 +33,9 @@ type (
 
 	FARPROC       = *func() INT_PTR
 	LPCSTR        = *CHAR
+	PBYTE         = *byte
+	LPTSTR        = *byte
+	LPCTSTR       = *byte
 	PVOID         = unsafe.Pointer
 	LPVOID        = unsafe.Pointer
 	HMEMORYMODULE = unsafe.Pointer
@@ -43,6 +47,8 @@ type IMAGE_IMPORT_BY_NAME struct {
 	Hint WORD
 	Name [1]BYTE
 }
+
+type PIMAGE_IMPORT_BY_NAME = *IMAGE_IMPORT_BY_NAME
 
 type SECTIONFINALIZEDATA struct {
 	address         LPVOID
@@ -60,22 +66,10 @@ type IMAGE_TLS_DIRECTORY struct {
 	SizeOfZeroFill        DWORD
 	characteristics       DWORD
 }
+type PIMAGE_TLS_DIRECTORY = *IMAGE_TLS_DIRECTORY
 
 type IMAGE_TLS_CALLBACK func(DllHandle PVOID, Reason DWORD, Reserved PVOID)
 type PIMAGE_TLS_CALLBACK = *IMAGE_TLS_CALLBACK
-
-var ProtectionFlags = [2][2][2]DWORD{
-	{
-		// not executable
-		{windows.PAGE_NOACCESS, windows.PAGE_WRITECOPY},
-		{windows.PAGE_READONLY, windows.PAGE_READWRITE},
-	},
-	{
-		// executable
-		{windows.PAGE_EXECUTE, windows.PAGE_EXECUTE_WRITECOPY},
-		{windows.PAGE_EXECUTE_READ, windows.PAGE_EXECUTE_READWRITE},
-	},
-}
 
 // DOS .EXE header
 type IMAGE_DOS_HEADER struct {
@@ -100,16 +94,32 @@ type IMAGE_DOS_HEADER struct {
 	e_lfanew   LONG     // File address of new exe header
 }
 
+type PIMAGE_DOS_HEADER = *IMAGE_DOS_HEADER
+
 type IMAGE_NT_HEADERS struct {
 	Signature      DWORD
 	FileHeader     pe.FileHeader
 	OptionalHeader pe.OptionalHeader64
 }
+type PIMAGE_NT_HEADERS = *IMAGE_NT_HEADERS
 
 type IMAGE_SECTION_HEADER struct {
-	// TODO: Name似乎不匹配
-	pe.SectionHeader
+	Name [IMAGE_SIZEOF_SHORT_NAME]BYTE
+	Misc struct {
+		PhysicalAddress DWORD
+		VirtualSize     DWORD
+	}
+	VirtualAddress       DWORD
+	SizeOfRawData        DWORD
+	PointerToRawData     DWORD
+	PointerToRelocations DWORD
+	PointerToLinenumbers DWORD
+	NumberOfRelocations  WORD
+	NumberOfLinenumbers  WORD
+	Characteristics      DWORD
 }
+
+type PIMAGE_SECTION_HEADER = *IMAGE_SECTION_HEADER
 
 type POINTER_LIST struct {
 	next    *POINTER_LIST
@@ -122,8 +132,8 @@ type ExportNameEntry struct {
 }
 
 type MLIBRARY struct {
-	headers          *IMAGE_NT_HEADERS
-	codeBase         *uint8
+	headers          PIMAGE_NT_HEADERS
+	codeBase         PBYTE
 	modules          *HCUSTOMMODULE
 	numModules       int32
 	initialized      BOOL
@@ -136,37 +146,64 @@ type MLIBRARY struct {
 	freeLibrary      CustomFreeLibraryFunc
 	nameExportsTable *ExportNameEntry
 	userdata         unsafe.Pointer
-	exeEntry         func() int
+	exeEntry         ExeEntryProc
 	pageSize         DWORD
-	blockMemory      *POINTER_LIST
+	blockedMemory    *POINTER_LIST
 }
 
+type MEMORYMODULE struct {
+	headers          PIMAGE_NT_HEADERS
+	codeBase         PBYTE
+	modules          *HCUSTOMMODULE
+	numModules       int32
+	initialized      BOOL
+	isDLL            BOOL
+	isRelocated      BOOL
+	alloc            CustomAllocFunc
+	free             CustomFreeFunc
+	loadLibrary      CustomLoadLibraryFunc
+	getProcAddress   CustomGetProcAddressFunc
+	freeLibrary      CustomFreeLibraryFunc
+	nameExportsTable *ExportNameEntry
+	userdata         PVOID
+	exeEntry         ExeEntryProc
+	pageSize         DWORD
+	blockedMemory    *POINTER_LIST
+}
+
+type PMEMORYMODULE = *MEMORYMODULE
+
+type PMLIBRARY = *MLIBRARY
+
 type HINSTANCE_ struct {
-	unused int32
+	_ /* unused */ int32
 }
 type HINSTANCE = *HINSTANCE_
 
-// #define IMAGE_FIRST_SECTION( ntheader ) ((PIMAGE_SECTION_HEADER)
-//
-//	((ULONG_PTR)(ntheader) +
-//	 FIELD_OFFSET( IMAGE_NT_HEADERS, OptionalHeader ) +
-//	 ((ntheader))->FileHeader.SizeOfOptionalHeader
-//	))
-func IMAGE_FIRST_SECTION(ntheader *IMAGE_NT_HEADERS) *IMAGE_SECTION_HEADER {
-	var ptr = to[ULONG_PTR](ntheader) + _FIELD_OFFSET_IMAGE_NT_HEADERS_OptionalHeader() + ULONG_PTR(ntheader.FileHeader.SizeOfOptionalHeader)
-	return to[*IMAGE_SECTION_HEADER](ptr)
+func IMAGE_FIRST_SECTION(ntheader PIMAGE_NT_HEADERS) PIMAGE_SECTION_HEADER {
+	var ptr = to[ULONG_PTR](ntheader) +
+		the_OFFSET() +
+		ULONG_PTR(ntheader.FileHeader.SizeOfOptionalHeader)
+
+	return to[PIMAGE_SECTION_HEADER](ptr)
 }
 
-func _FIELD_OFFSET_IMAGE_NT_HEADERS_OptionalHeader() ULONG_PTR {
+func the_OFFSET() ULONG_PTR {
 	var tmp = IMAGE_NT_HEADERS{}
-	return to[ULONG_PTR](&tmp.OptionalHeader) - to[ULONG_PTR](&tmp)
+	start := to[ULONG_PTR](&tmp)
+	end := to[ULONG_PTR](&tmp.OptionalHeader)
+	if start > end {
+		return start - end
+	} else {
+		return end - start
+	}
 }
 
 func IMAGE_SNAP_BY_ORDINAL(Ordinal uintptr_t) bool {
 	return IMAGE_SNAP_BY_ORDINAL64(Ordinal)
 }
 
-const IMAGE_ORDINAL_FLAG64 = uint64(0x8000000000000000)
+const IMAGE_ORDINAL_FLAG64 = 0x8000000000000000
 
 func IMAGE_SNAP_BY_ORDINAL64(Ordinal uintptr_t) bool {
 	return Ordinal&IMAGE_ORDINAL_FLAG64 != 0
@@ -180,10 +217,25 @@ func IMAGE_ORDINAL64(Ordinal uintptr_t) uintptr_t {
 	return Ordinal & uint64(0xffff)
 }
 
-type IMAGE_IMPORT_DESCRIPTOR = pe.ImportDirectory
+type IMAGE_IMPORT_DESCRIPTOR struct {
+	Characteristics    DWORD // 0 for terminating null import descriptor
+	OriginalFirstThunk DWORD // RVA to original unbound IAT (PIMAGE_THUNK_DATA)
+
+	TimeDateStamp DWORD // 0 if not bound,
+	// -1 if bound, and real date\time stamp
+	//     in IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT (new BIND)
+	// O.W. date/time stamp of DLL bound to (Old BIND)
+
+	ForwarderChain DWORD // -1 if no forwarders
+	Name           DWORD
+	FirstThunk     DWORD
+}
+
+type PIMAGE_IMPORT_DESCRIPTOR = *IMAGE_IMPORT_DESCRIPTOR
 
 type IMAGE_DATA_DIRECTORY = pe.DataDirectory
+type PIMAGE_DATA_DIRECTORY = *IMAGE_DATA_DIRECTORY
 
-func GET_HEADER_DICTIONARY(module *MLIBRARY, idx int) *IMAGE_DATA_DIRECTORY {
+func GET_HEADER_DICTIONARY(module *MLIBRARY, idx int) PIMAGE_DATA_DIRECTORY {
 	return &module.headers.OptionalHeader.DataDirectory[idx]
 }
