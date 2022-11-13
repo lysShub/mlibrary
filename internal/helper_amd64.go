@@ -1,5 +1,5 @@
 // winnt.h
-package mlibrary
+package library
 
 import (
 	"debug/pe"

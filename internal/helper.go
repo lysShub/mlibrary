@@ -1,4 +1,4 @@
-package mlibrary
+package library
 
 import (
 	"reflect"

@@ -1,7 +1,7 @@
 //go:build windows
 // +build windows
 
-package mlibrary
+package library
 
 import (
 	"debug/pe"
