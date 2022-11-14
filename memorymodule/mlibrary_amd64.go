@@ -1,12 +1,14 @@
 //go:build windows
 // +build windows
 
-package library
+package memorymodule
 
 import (
 	"debug/pe"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
 	"syscall"
 	"unsafe"
 
@@ -33,7 +35,7 @@ func OffsetPointer(data PBYTE, offset ptrdiff_t) PBYTE { return nil }
 
 func OutputLastError(msg string) {}
 
-func FreePointerList(head *POINTER_LIST, freeMemory CustomFreeFunc) {
+func FreePointerList(head *POINTER_LIST, freeMemory CustomFreeFunc, userdate unsafe.Pointer) {
 	var node *POINTER_LIST = head
 	var next *POINTER_LIST
 	for node != nil {
@@ -48,7 +50,7 @@ func CheckSize(size, exprcted size_t) bool {
 	return size >= exprcted
 }
 
-func CopySections(data *uint8, size size_t, old_headers *IMAGE_NT_HEADERS, module *MLIBRARY) bool {
+func CopySections(data *uint8, size size_t, old_headers *IMAGE_NT_HEADERS, module *MEMORYMODULE) bool {
 	var section_size int32
 	var codeBase = module.codeBase
 	var dest LPVOID
@@ -130,7 +132,7 @@ var ProtectionFlags = [2][2][2]DWORD{
 	},
 }
 
-func GetRealSectionSize(module *MLIBRARY, section PIMAGE_SECTION_HEADER) SIZE_T {
+func GetRealSectionSize(module *MEMORYMODULE, section PIMAGE_SECTION_HEADER) SIZE_T {
 	var size DWORD = section.SizeOfRawData
 	if size == 0 {
 		if section.Characteristics&pe.IMAGE_SCN_CNT_INITIALIZED_DATA == uint32(TRUE) {
@@ -142,7 +144,7 @@ func GetRealSectionSize(module *MLIBRARY, section PIMAGE_SECTION_HEADER) SIZE_T 
 	return to[SIZE_T](size)
 }
 
-func FinalizeSection(module *MLIBRARY, sectionData *SECTIONFINALIZEDATA) bool {
+func FinalizeSection(module *MEMORYMODULE, sectionData *SECTIONFINALIZEDATA) bool {
 	var protect, oldProtect DWORD
 	var executable BOOL = FALSE
 	var readable BOOL = FALSE
@@ -190,7 +192,7 @@ func FinalizeSection(module *MLIBRARY, sectionData *SECTIONFINALIZEDATA) bool {
 	return true
 }
 
-func FinalizeSections(module *MLIBRARY) BOOL {
+func FinalizeSections(module *MEMORYMODULE) BOOL {
 	var section *IMAGE_SECTION_HEADER = IMAGE_FIRST_SECTION(module.headers)
 	var imageOffset uintptr_t = uintptr_t(module.headers.OptionalHeader.ImageBase) & 0xffffffff00000000
 	var sectionData SECTIONFINALIZEDATA
@@ -240,7 +242,7 @@ func FinalizeSections(module *MLIBRARY) BOOL {
 	return FALSE
 }
 
-func ExecuteTLS(module *MLIBRARY) BOOL {
+func ExecuteTLS(module *MEMORYMODULE) BOOL {
 
 	var codeBase = module.codeBase
 	var tls PIMAGE_TLS_DIRECTORY
@@ -273,7 +275,7 @@ func ExecuteTLS(module *MLIBRARY) BOOL {
 
 func PerformBaseRelocation(module PMEMORYMODULE, delta ptrdiff_t) BOOL { return 0 }
 
-func BuildImportTable(module *MLIBRARY) bool {
+func BuildImportTable(module *MEMORYMODULE) bool {
 	var codeBase = module.codeBase
 	var importDesc *IMAGE_IMPORT_DESCRIPTOR
 	var result bool = true
@@ -396,7 +398,7 @@ func MemoryLoadLibraryEx(data []byte,
 	var err error
 
 	var (
-		result              PMLIBRARY
+		result              PMEMORYMODULE
 		dos_header          PIMAGE_DOS_HEADER
 		old_header          PIMAGE_NT_HEADERS
 		code, headers       LPVOID
@@ -486,13 +488,13 @@ func MemoryLoadLibraryEx(data []byte,
 		}
 	}
 
-	tResult, err := HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size_t(unsafe.Sizeof(MLIBRARY{})))
+	tResult, err := HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size_t(unsafe.Sizeof(MEMORYMODULE{})))
 	if err != nil {
 		(*freeMemory)(code, 0, windows.MEM_RELEASE, userdata)
 		panic(fmt.Errorf("格式错误10: %s", err))
 	}
 
-	result = to[*MLIBRARY](tResult)
+	result = to[*MEMORYMODULE](tResult)
 	result.codeBase = to[PBYTE](code)
 	result.isDLL = BOOL(old_header.FileHeader.Characteristics & pe.IMAGE_FILE_DLL)
 	result.alloc = allocMemory
@@ -591,15 +593,202 @@ func MemoryLoadLibraryEx(data []byte,
 }
 
 func MemoryGetProcAddress(mod HMEMORYMODULE, name LPCSTR) FARPROC {
+	var module = to[PMEMORYMODULE](mod)
+	var codeBase = module.codeBase
+	var idx DWORD = 0
+	var exports PIMAGE_EXPORT_DIRECTORY
+	var directory PIMAGE_DATA_DIRECTORY = GET_HEADER_DICTIONARY(module, pe.IMAGE_DIRECTORY_ENTRY_EXPORT)
+
+	if directory.Size == 0 {
+		panic("格式错误 23日期容器3")
+		return nil
+	}
+
+	exports = to[PIMAGE_EXPORT_DIRECTORY](add(codeBase, directory.VirtualAddress))
+	if exports.NumberOfNames == 0 || exports.NumberOfFunctions == 0 {
+		panic("格式错误 235234")
+		return nil
+	}
+
+	if HIWORD(name) == 0 {
+		// load function by ordinal value
+		if LOWORD(name) < uint16(exports.Base) {
+			panic("格式错误 6734")
+			return nil
+		}
+
+		idx = uint32(LOWORD(name)) - exports.Base
+	} else if !OK(exports.NumberOfNames) {
+		panic("格式错误 568245")
+		return nil
+	} else {
+
+		// Lazily build name table and sort it by names
+		if !OK(to[uintptr](module.nameExportsTable)) {
+
+			var nameRef = to[*DWORD](add(codeBase, exports.AddressOfNames))
+			var ordinal = to[*WORD](add(codeBase, exports.AddressOfNameOrdinals))
+			var entry = to[*ExportNameEntry](
+				malloc(int(exports.NumberOfNames) * int(unsafe.Sizeof(ExportNameEntry{}))),
+			)
+			module.nameExportsTable = entry
+			if !OK(to[uintptr](entry)) {
+				panic("格式错误 456354")
+				return nil
+			}
+			for i := DWORD(0); i < exports.NumberOfNames; i, nameRef = i+1, add(nameRef, unsafe.Sizeof(*nameRef)) {
+
+				entry.name = to[unsafe.Pointer](add(codeBase, *nameRef))
+				entry.idx = *ordinal
+			}
+
+			// module.nameExportsTable  		数据
+			// exports.NumberOfNames    		元素个数
+			// unsafe.Sizeof(ExportNameEntry{}) 元素大小
+			// less	name						比较函数
+
+			var t = reflect.SliceHeader{
+				Data: to[uintptr](module.nameExportsTable),
+				Len:  int(exports.NumberOfNames),
+				Cap:  int(exports.NumberOfNames),
+			}
+			st := to[[]ExportNameEntry](t)
+			sort.Slice(st, func(i, j int) bool { return to[uintptr](st[i].name) < to[uintptr](st[j].name) })
+		}
+
+		// search function name in list of exported names with binary search
+		eSize := int(unsafe.Sizeof(ExportNameEntry{}))
+		jdx := sort.Search(
+			int(exports.NumberOfNames),
+			func(i int) bool {
+				e := to[*ExportNameEntry](add(module.nameExportsTable, i*eSize))
+
+				return to[uintptr](e.name) < to[uintptr](name)
+			},
+		)
+		if jdx < int(exports.NumberOfNames) {
+			e := to[*ExportNameEntry](add(module.nameExportsTable, jdx*eSize))
+			if to[uintptr](e.name) < to[uintptr](name) {
+				goto found
+			}
+		}
+		// exported symbol not found
+		panic("exported symbol not found")
+		return nil
+	found:
+		idx = uint32(to[*ExportNameEntry](add(module.nameExportsTable, jdx*eSize)).idx)
+	}
+
+	if idx > exports.NumberOfFunctions {
+		// name <-> ordinal number don't match
+		panic("搜索出错")
+		return nil
+	}
+
+	// AddressOfFunctions contains the RVAs to the "real" functions
+	tmp := to[*DWORD](add(codeBase, exports.AddressOfFunctions+(idx*4)))
+
+	return to[FARPROC](to[LPVOID](add(codeBase, *tmp)))
+}
+
+func MemoryFreeLibrary(mod HMEMORYMODULE) {
+	var module = to[PMEMORYMODULE](mod)
+
+	if module == nil {
+		return
+	}
+	if OK(module.initialized) {
+		// notify library about detaching from process
+		var DllEntry = to[DllEntryProc](to[LPVOID](add(module.codeBase, module.headers.OptionalHeader.AddressOfEntryPoint)))
+
+		syscall.SyscallN(
+			to[uintptr](DllEntry),
+			to[uintptr](module.codeBase),
+			DLL_PROCESS_ATTACH,
+			0,
+		)
+	}
+	// free(module->nameExportsTable);
+	if module.nameExportsTable != nil {
+		// free previously opened libraries
+		eSize := int32(unsafe.Sizeof(0))
+		for i := int32(0); i < module.numModules; i++ {
+
+			// TODO: 拿不稳
+			if e := add(module.modules, eSize*i); *e != nil {
+				(*module.freeLibrary)(*e, module.userdata)
+			}
+		}
+		// free(module->modules);
+	}
+
+	if module.codeBase != nil {
+		// release memory of library
+		(*module.free)(
+			to[unsafe.Pointer](module.codeBase),
+			0,
+			windows.MEM_RELEASE,
+			module.userdata,
+		)
+	}
+
+	FreePointerList(module.blockedMemory, module.free, module.userdata)
+
+	HeapFree(GetProcessHeap(), 0, module)
+}
+
+func MemoryCallEntryPoint(mod HMEMORYMODULE) int32 {
+	var module = to[PMEMORYMODULE](mod)
+
+	if module == nil || OK(module.isDLL) || module.exeEntry == nil || !OK(module.isRelocated) {
+		return -1
+	}
+
+	return (*module.exeEntry)()
+}
+
+func MemoryFindResource(module HMEMORYMODULE, name, typ LPCTSTR) HMEMORYRSRC {
+	return MemoryFindResourceEx(module, name, typ, DEFAULT_LANGUAGE)
+}
+
+func _MemorySearchResourceEntry(root PBYTE, resources PIMAGE_RESOURCE_DIRECTORY, key LPCTSTR) PIMAGE_RESOURCE_DIRECTORY_ENTRY {
 
 	return nil
 }
 
-func MemoryFreeLibrary(mod HMEMORYMODULE) {}
+func MemoryFindResourceEx(module HMEMORYMODULE, name, typ LPCTSTR, language WORD) HMEMORYRSRC {
 
-func MemoryCallEntryPoint(mod HMEMORYMODULE) int32 { return 0 }
+	var codeBase = to[PMEMORYMODULE](module).codeBase
+	var directory = GET_HEADER_DICTIONARY(to[PMEMORYMODULE](module), pe.IMAGE_DIRECTORY_ENTRY_RESOURCE)
+	var rootResources PIMAGE_RESOURCE_DIRECTORY
+	var nameResourcts PIMAGE_RESOURCE_DIRECTORY
+	var typeResourcts PIMAGE_RESOURCE_DIRECTORY
+	var foundType PIMAGE_RESOURCE_DIRECTORY_ENTRY
+	var foundName PIMAGE_RESOURCE_DIRECTORY_ENTRY
+	var foundLanguage PIMAGE_RESOURCE_DIRECTORY_ENTRY
+	if directory.Size == 0 {
+		// no resource table found
+		panic("ERROR_RESOURCE_DATA_NOT_FOUND")
+		return nil
+	}
 
-func MemoryFindResource(module HMEMORYMODULE, name, typ LPCTSTR) HMEMORYRSRC { return nil }
+	if language == DEFAULT_LANGUAGE {
+		// use language from current thread
+		language = LANGIDFROMLCID(GetThreadLocale())
+	}
+
+	// resources are stored as three-level tree
+	// - first node is the type
+	// - second node is the name
+	// - third node is the language
+	rootResources = to[PIMAGE_RESOURCE_DIRECTORY](add(codeBase, directory.VirtualAddress))
+	foundType = _MemorySearchResourceEntry(to[PBYTE](rootResources), rootResources, typ)
+	if foundType == nil {
+		panic("ERROR_RESOURCE_TYPE_NOT_FOUND 11")
+		return nil
+	}
+	return nil
+}
 
 func MemorySizeofResource(module HMEMORYMODULE, resource HMEMORYRSRC) DWORD { return 0 }
 

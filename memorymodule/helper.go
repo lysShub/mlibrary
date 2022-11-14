@@ -1,4 +1,4 @@
-package library
+package memorymodule
 
 import (
 	"reflect"
@@ -39,13 +39,40 @@ type CustomFreeLibraryFunc *func(HCUSTOMMODULE, PVOID) error
 type BYTE = byte
 
 type Literal interface {
-	LPVOID | uintptr | uint64 | uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MLIBRARY | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK | DllEntryProc | ExeEntryProc
+	LPVOID | uintptr | uint64 | uint32 | *uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MEMORYMODULE | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK | DllEntryProc | ExeEntryProc | PIMAGE_EXPORT_DIRECTORY | *ExportNameEntry | []ExportNameEntry | PIMAGE_RESOURCE_DIRECTORY
 }
 
 // typedef BOOL(WINAPI *DllEntryProc)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
 type DllEntryProc *func(hinstDLL HINSTANCE, fdwReson DWORD, lpReserved LPVOID) BOOL
 
-type ExeEntryProc *func() int
+type ExeEntryProc *func() int32
+
+type IMAGE_RESOURCE_DIRECTORY struct {
+	Characteristics      DWORD
+	TimeDateStamp        DWORD
+	MajorVersion         WORD
+	MinorVersion         WORD
+	NumberOfNamedEntries WORD
+	NumberOfIdEntries    WORD
+	//  IMAGE_RESOURCE_DIRECTORY_ENTRY DirectoryEntries[];
+}
+
+type PIMAGE_RESOURCE_DIRECTORY = *IMAGE_RESOURCE_DIRECTORY
+
+type IMAGE_RESOURCE_DIRECTORY_ENTRY struct {
+	NameOffset   DWORD // TODO: :31 是啥意思
+	NameIsString DWORD
+
+	Name DWORD
+	Id   WORD
+
+	OffsetToData DWORD
+
+	OffsetToDirectory DWORD
+	DataIsDirectory   DWORD
+}
+
+type PIMAGE_RESOURCE_DIRECTORY_ENTRY = *IMAGE_RESOURCE_DIRECTORY_ENTRY
 
 func to[T Literal](v any) T {
 	var typ = *(*uint8)(unsafe.Add(*(*unsafe.Pointer)(unsafe.Pointer(&v)), _typeOffset)) & _typeMask
@@ -152,3 +179,5 @@ func LoadLibraryA(libname string) (handle windows.Handle, err error) {
 	}
 	return handle, err
 }
+
+func LANGIDFROMLCID(lcid LCID) WORD { return WORD(lcid) }

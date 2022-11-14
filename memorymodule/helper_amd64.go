@@ -1,5 +1,5 @@
 // winnt.h
-package library
+package memorymodule
 
 import (
 	"debug/pe"
@@ -7,18 +7,21 @@ import (
 )
 
 const (
-	IMAGE_DOS_SIGNATURE      = 0x5A4D
-	IMAGE_NT_SIGNATURE       = 0x00004550
-	HOST_MACHINE             = 0x8664
-	IMAGE_SCN_MEM_NOT_CACHED = 0x04000000
-	IMAGE_SIZEOF_SHORT_NAME  = 8
-	DLL_PROCESS_ATTACH       = 1
+	IMAGE_DOS_SIGNATURE           = 0x5A4D
+	IMAGE_NT_SIGNATURE            = 0x00004550
+	HOST_MACHINE                  = 0x8664
+	IMAGE_SCN_MEM_NOT_CACHED      = 0x04000000
+	IMAGE_SIZEOF_SHORT_NAME       = 8
+	DLL_PROCESS_ATTACH            = 1
+	LANG_NEUTRAL, SUBLANG_NEUTRAL = 0, 0
+	DEFAULT_LANGUAGE              = ((WORD(LANG_NEUTRAL)) << 10) | (WORD(SUBLANG_NEUTRAL))
 )
 
 type (
 	CHAR      = byte
 	WORD      = uint16
 	DWORD     = uint32
+	LCID      = DWORD
 	LONG      = int32
 	BOOL      = int32
 	UINT      = uint32
@@ -26,6 +29,7 @@ type (
 	INT_PTR   = int64
 	size_t    = uint64
 	ULONG_PTR = uint64
+	DWORD_PTR = ULONG_PTR
 	UINT_PTR  = uint64
 	uintptr_t = uint64
 	ULONGLONG = uint64
@@ -131,7 +135,7 @@ type ExportNameEntry struct {
 	idx  WORD
 }
 
-type MLIBRARY struct {
+type MEMORYMODULE struct {
 	headers          PIMAGE_NT_HEADERS
 	codeBase         PBYTE
 	modules          *HCUSTOMMODULE
@@ -151,34 +155,28 @@ type MLIBRARY struct {
 	blockedMemory    *POINTER_LIST
 }
 
-type MEMORYMODULE struct {
-	headers          PIMAGE_NT_HEADERS
-	codeBase         PBYTE
-	modules          *HCUSTOMMODULE
-	numModules       int32
-	initialized      BOOL
-	isDLL            BOOL
-	isRelocated      BOOL
-	alloc            CustomAllocFunc
-	free             CustomFreeFunc
-	loadLibrary      CustomLoadLibraryFunc
-	getProcAddress   CustomGetProcAddressFunc
-	freeLibrary      CustomFreeLibraryFunc
-	nameExportsTable *ExportNameEntry
-	userdata         PVOID
-	exeEntry         ExeEntryProc
-	pageSize         DWORD
-	blockedMemory    *POINTER_LIST
-}
-
 type PMEMORYMODULE = *MEMORYMODULE
-
-type PMLIBRARY = *MLIBRARY
 
 type HINSTANCE_ struct {
 	_ /* unused */ int32
 }
 type HINSTANCE = *HINSTANCE_
+
+type IMAGE_EXPORT_DIRECTORY struct {
+	Characteristics       DWORD
+	TimeDateStamp         DWORD
+	MajorVersion          WORD
+	MinorVersion          WORD
+	Name                  DWORD
+	Base                  DWORD
+	NumberOfFunctions     DWORD
+	NumberOfNames         DWORD
+	AddressOfFunctions    DWORD // RVA from base of image
+	AddressOfNames        DWORD // RVA from base of image
+	AddressOfNameOrdinals DWORD // RVA from base of image
+}
+
+type PIMAGE_EXPORT_DIRECTORY = *IMAGE_EXPORT_DIRECTORY
 
 func IMAGE_FIRST_SECTION(ntheader PIMAGE_NT_HEADERS) PIMAGE_SECTION_HEADER {
 	var ptr = to[ULONG_PTR](ntheader) +
@@ -197,6 +195,10 @@ func the_OFFSET() ULONG_PTR {
 	} else {
 		return end - start
 	}
+}
+
+func OK[T int | uint | uint32 | int32 | uintptr](n T) bool {
+	return n != 0
 }
 
 func IMAGE_SNAP_BY_ORDINAL(Ordinal uintptr_t) bool {
@@ -236,6 +238,18 @@ type PIMAGE_IMPORT_DESCRIPTOR = *IMAGE_IMPORT_DESCRIPTOR
 type IMAGE_DATA_DIRECTORY = pe.DataDirectory
 type PIMAGE_DATA_DIRECTORY = *IMAGE_DATA_DIRECTORY
 
-func GET_HEADER_DICTIONARY(module *MLIBRARY, idx int) PIMAGE_DATA_DIRECTORY {
+func malloc(size int) PVOID {
+	return nil
+}
+
+func GET_HEADER_DICTIONARY(module *MEMORYMODULE, idx int) PIMAGE_DATA_DIRECTORY {
 	return &module.headers.OptionalHeader.DataDirectory[idx]
+}
+
+func HIWORD(l LPCSTR) WORD {
+	return WORD((to[DWORD_PTR](l) >> 16) & 0xffff)
+}
+
+func LOWORD(l LPCSTR) WORD {
+	return WORD(to[DWORD_PTR](l) & 0xffff)
 }
