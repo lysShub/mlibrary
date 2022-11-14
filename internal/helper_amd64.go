@@ -19,7 +19,10 @@ const (
 
 type (
 	CHAR      = byte
+	TCHAR     = byte
 	WORD      = uint16
+	wchar_t   = uint16
+	WCHAR     = uint16
 	DWORD     = uint32
 	LCID      = DWORD
 	LONG      = int32
@@ -40,6 +43,8 @@ type (
 	PBYTE         = *byte
 	LPTSTR        = *byte
 	LPCTSTR       = *byte
+	LPCWSTR       = *WORD
+	LPWSTR        = *WCHAR
 	PVOID         = unsafe.Pointer
 	LPVOID        = unsafe.Pointer
 	HMEMORYMODULE = unsafe.Pointer

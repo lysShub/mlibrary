@@ -2,6 +2,7 @@ package memorymodule
 
 import (
 	"reflect"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -39,7 +40,7 @@ type CustomFreeLibraryFunc *func(HCUSTOMMODULE, PVOID) error
 type BYTE = byte
 
 type Literal interface {
-	LPVOID | uintptr | uint64 | uint32 | *uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MEMORYMODULE | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK | DllEntryProc | ExeEntryProc | PIMAGE_EXPORT_DIRECTORY | *ExportNameEntry | []ExportNameEntry | PIMAGE_RESOURCE_DIRECTORY
+	LPVOID | uintptr | uint64 | uint32 | *uint32 | *int | *uint8 | []byte | string | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *MEMORYMODULE | *IMAGE_IMPORT_DESCRIPTOR | *HCUSTOMMODULE | *uintptr | *uint16 | uint16 | uint8 | *uintptr_t | *FARPROC | FARPROC | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY | *PIMAGE_TLS_CALLBACK | DllEntryProc | ExeEntryProc | PIMAGE_EXPORT_DIRECTORY | *ExportNameEntry | []ExportNameEntry | PIMAGE_RESOURCE_DIRECTORY | PIMAGE_RESOURCE_DIRECTORY_ENTRY
 }
 
 // typedef BOOL(WINAPI *DllEntryProc)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
@@ -181,3 +182,32 @@ func LoadLibraryA(libname string) (handle windows.Handle, err error) {
 }
 
 func LANGIDFROMLCID(lcid LCID) WORD { return WORD(lcid) }
+
+func IS_INTRESOURCE(_r LPCTSTR) bool {
+	return (to[ULONG_PTR](_r) >> 16) == 0
+}
+
+func cstrLen(h LPCTSTR) (n int) {
+	for *h != 0 {
+		n++
+		h = (LPCTSTR)(unsafe.Add(unsafe.Pointer(h), 1))
+	}
+	return n
+}
+
+func _tcslen(_Str PBYTE) size_t {
+	var tmp = reflect.StringHeader{
+		Data: to[uintptr](_Str),
+		Len:  cstrLen(_Str),
+	}
+	tmpkey, err := strconv.Atoi(to[string](&tmp))
+
+	if err != nil {
+		return 0
+	}
+	return uint64(tmpkey)
+}
+
+func MAKEINTRESOURCEA(i int32) LPCTSTR {
+	return to[LPCSTR](ULONG_PTR(WORD(i)))
+}

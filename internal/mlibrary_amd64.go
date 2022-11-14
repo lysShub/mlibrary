@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -753,6 +754,71 @@ func MemoryFindResource(module HMEMORYMODULE, name, typ LPCTSTR) HMEMORYRSRC {
 
 func _MemorySearchResourceEntry(root PBYTE, resources PIMAGE_RESOURCE_DIRECTORY, key LPCTSTR) PIMAGE_RESOURCE_DIRECTORY_ENTRY {
 
+	var root PVOID
+	var resources PIMAGE_RESOURCE_DIRECTORY
+
+	var entries = to[PIMAGE_RESOURCE_DIRECTORY_ENTRY](add(resources, unsafe.Sizeof(*resources)))
+	var result PIMAGE_RESOURCE_DIRECTORY_ENTRY = nil
+	var start DWORD
+	var end DWORD
+	var middle DWORD
+
+	if IS_INTRESOURCE(key) && *to[*byte](key) == '#' {
+		// special case: resource id given as string
+		var tmp = reflect.StringHeader{
+			Data: to[uintptr](add(key, 1)),
+			Len:  cstrLen(add(key, 1)),
+		}
+		tmpkey, err := strconv.Atoi(to[string](&tmp))
+		if tmpkey <= 0xffff && err == nil {
+			key = MAKEINTRESOURCEA(int32(tmpkey))
+		}
+	}
+
+	// entries are stored as ordered list of named entries,
+	// followed by an ordered list of id entries - we can do
+	// a binary search to find faster...
+	if IS_INTRESOURCE(key) {
+		var check = WORD(to[uintptr_t](key))
+		start = uint32(resources.NumberOfNamedEntries)
+		end = start + uint32(resources.NumberOfIdEntries)
+
+		esize := uint32(unsafe.Sizeof(*entries))
+		for end > start {
+			var entryName WORD
+			middle = (start + end) >> 1
+			entryName = WORD(add(entries, middle*esize).Name)
+			if check < entryName {
+				end = middle
+				if end != middle {
+					end = middle - 1
+				}
+			} else if check > entryName {
+				start = middle
+				if end != middle {
+					start = middle - 1
+				}
+			} else {
+				result = add(entries, middle*esize)
+				break
+			}
+		}
+	} else {
+		var searchKey LPCWSTR
+		var searchKeyLen = _tcslen(key)
+		// Resource names are always stored using 16bit characters, need to
+		// convert string we search for.
+		const MAX_LOCAL_KEY_LENGTH = 2048
+		// In most cases resource names are short, so optimize for that by
+		// using a pre-allocated array.
+		var _searchKeySpace [MAX_LOCAL_KEY_LENGTH + 1]wchar_t
+		var _searchKey LPWSTR
+		if searchKeyLen > MAX_LOCAL_KEY_LENGTH {
+			var _searchKeySize size_t = (searchKeyLen + 1) * size_t(unsafe.Sizeof(wchar_t(0)))
+
+		}
+	}
+
 	return nil
 }
 
@@ -787,6 +853,7 @@ func MemoryFindResourceEx(module HMEMORYMODULE, name, typ LPCTSTR, language WORD
 		panic("ERROR_RESOURCE_TYPE_NOT_FOUND 11")
 		return nil
 	}
+
 	return nil
 }
 
