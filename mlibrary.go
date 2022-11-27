@@ -51,6 +51,10 @@ func NewMLibrary(b []byte) (dll *windows.DLL, err error) {
 	}()
 
 	{ // load
+		var oldprotect DWORD
+		if err := windows.VirtualProtect(mempe, imageSize, windows.PAGE_EXECUTE_READWRITE, &oldprotect); err != nil {
+			return nil, err
+		}
 
 		// copy headers
 		memcpy(
@@ -74,13 +78,17 @@ func NewMLibrary(b []byte) (dll *windows.DLL, err error) {
 				size,
 			)
 		}
+
+		if err := windows.VirtualProtect(mempe, imageSize, oldprotect, &oldprotect); err != nil {
+			return nil, err
+		}
 	}
 
 	var pDOSHeader = to[*IMAGE_DOS_HEADER](mempe)
 	var pNTHeader = to[*IMAGE_NT_HEADERS](mempe + uintptr(pDOSHeader.e_lfanew))
 	var pOptHeader = &pNTHeader.OptionalHeader
 
-	{ // align
+	{ // mem alignment
 		pSectHeader := to[*IMAGE_SECTION_HEADER](uintptr(unsafe.Pointer(pOptHeader)) + uintptr(pNTHeader.FileHeader.SizeOfOptionalHeader))
 
 		pOptHeader.FileAlignment = pOptHeader.SectionAlignment
@@ -164,8 +172,7 @@ func NewMLibrary(b []byte) (dll *windows.DLL, err error) {
 		// typedef BOOL(WINAPI *DllEntryProc)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 		r1, _, err := syscall.SyscallN(entry, mempe, DLL_PROCESS_ATTACH, 0)
 		if err != 0 || r1 == 0 {
-			return nil, fmt.Errorf("dll prcess attach failed, %s", err)
-
+			return nil, fmt.Errorf("dll process attach failed, %s", err)
 		}
 
 		return &windows.DLL{
