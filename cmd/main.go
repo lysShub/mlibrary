@@ -17,7 +17,6 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-
 	rb, _ := ioutil.ReadAll(f)
 
 	mlibrary.NewMLibrary(f, uintptr(unsafe.Pointer(&rb[0])))

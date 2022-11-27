@@ -1,8 +1,9 @@
 package mlibrary
 
 import (
+	"bytes"
 	"fmt"
-	"io"
+	"syscall"
 	"unsafe"
 
 	"debug/pe"
@@ -10,8 +11,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func NewMLibrary(src io.ReaderAt, da uintptr) (*windows.DLL, error) {
-	p, err := pe.NewFile(src)
+func NewMLibrary(b []byte) (dll *windows.DLL, err error) {
+	p, err := pe.NewFile(bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
@@ -22,6 +23,9 @@ func NewMLibrary(src io.ReaderAt, da uintptr) (*windows.DLL, error) {
 	var sections = p.Sections
 	var sectNum = fileHeader.NumberOfSections
 	var imageSize = uintptr(optHeader.SizeOfImage)
+	if fileHeader.Characteristics&pe.IMAGE_FILE_DLL == 0 {
+		return nil, fmt.Errorf("pe file isn't a dll")
+	}
 
 	var reloc bool = true
 	mempe, err = windows.VirtualAlloc(uintptr(optHeader.ImageBase), imageSize, windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE)
@@ -37,62 +41,61 @@ func NewMLibrary(src io.ReaderAt, da uintptr) (*windows.DLL, error) {
 			return nil, err
 		}
 	}
+	defer func() {
+		if e := recover(); e != nil {
+			err = fmt.Errorf("%v", e)
+		}
+		if err != nil {
+			windows.VirtualFree(mempe, 0, windows.MEM_RELEASE)
+		}
+	}()
 
 	{ // load
 
 		// copy headers
-		var buf []byte = make([]byte, optHeader.SizeOfHeaders)
-		if n, err := src.ReadAt(buf, 0); err != nil {
-			return nil, err
-		} else if n != int(optHeader.SizeOfHeaders) {
-			return nil, io.ErrUnexpectedEOF
-		}
-		CopyMemory(
+		memcpy(
 			mempe,
-			uintptr(unsafe.Pointer(&buf[0])),
+			uintptr(unsafe.Pointer(&b[0])),
 			int(optHeader.SizeOfHeaders),
 		)
 
-		var pDOSHeader = to[*IMAGE_DOS_HEADER](mempe)
-		var pNTHeader = to[*IMAGE_NT_HEADERS](mempe + uintptr(pDOSHeader.e_lfanew))
-		fmt.Println(pNTHeader)
-
 		// copy sections
 		for i := uint16(0); i < sectNum; i++ {
-			var pSectHeader = sections[i].SectionHeader
+			pSectHeader := sections[i].SectionHeader
 			if pSectHeader.Size == 0 {
 				continue
 			}
 
-			var buf []byte = make([]byte, pSectHeader.Size /*SizeOfRawData*/)
-			if n, err := src.ReadAt(buf, int64(pSectHeader.Offset /*PointerToRawData*/)); err != nil {
-				return nil, err
-			} else if n != int(pSectHeader.Size) {
-				return nil, io.ErrUnexpectedEOF
-			}
-			CopyMemory(
+			off := int(pSectHeader.Offset)
+			size := int(pSectHeader.Size) /*SizeOfRawData*/
+			memcpy(
 				mempe+uintptr(pSectHeader.VirtualAddress),
-				uintptr(unsafe.Pointer(&buf[0])),
-				len(buf),
+				uintptr(unsafe.Pointer(&b[off])),
+				size,
 			)
 		}
-
-		// validate mem align
-		// TODO
 	}
 
 	var pDOSHeader = to[*IMAGE_DOS_HEADER](mempe)
 	var pNTHeader = to[*IMAGE_NT_HEADERS](mempe + uintptr(pDOSHeader.e_lfanew))
 	var pOptHeader = &pNTHeader.OptionalHeader
 
+	{ // align
+		pSectHeader := to[*IMAGE_SECTION_HEADER](uintptr(unsafe.Pointer(pOptHeader)) + uintptr(pNTHeader.FileHeader.SizeOfOptionalHeader))
+
+		pOptHeader.FileAlignment = pOptHeader.SectionAlignment
+		for i := uint16(0); i < sectNum; i++ {
+			pSectHeader.PointerToRawData = pSectHeader.VirtualAddress
+
+			pSectHeader = add(pSectHeader, 1)
+		}
+	}
+
 	if reloc { // relocate
 
 		var pRelocationTable = pNTHeader.OptionalHeader.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_BASERELOC]
 		var pRelocEntry = to[*IMAGE_BASE_RELOCATION](mempe + uintptr(pRelocationTable.VirtualAddress))
 		var offset = DWORD(mempe - uintptr(pNTHeader.OptionalHeader.ImageBase))
-		if mempe < uintptr(pNTHeader.OptionalHeader.ImageBase) {
-			panic(mempe)
-		}
 
 		for pRelocEntry != nil && (pRelocEntry.SizeOfBlock != 0 && pRelocEntry.VirtualAddress != 0) {
 
@@ -122,39 +125,57 @@ func NewMLibrary(src io.ReaderAt, da uintptr) (*windows.DLL, error) {
 		var pName string
 		var pThunk *IMAGE_THUNK_DATA
 		var pOThunk *IMAGE_THUNK_DATA
-		// 导入dll文件数量
 		for ; pImpDesc.Name != 0; pImpDesc = add(pImpDesc, 1) {
+
 			pName = toStr(mempe + uintptr(pImpDesc.Name))
 			pThunk = to[*IMAGE_THUNK_DATA](mempe + uintptr(pImpDesc.FirstThunk))
 			pOThunk = to[*IMAGE_THUNK_DATA](mempe + uintptr(pImpDesc.OriginalFirstThunk))
 
-			// 导入此文件的函数数量
 			h, err := windows.LoadLibrary(pName)
 			if err != nil {
 				return nil, err
 			}
-			for j := 0; pThunk.Function != 0 && pOThunk.Function != 0; j++ {
-				pOThunk = add(pOThunk, j)
-				var _addr = mempe + uintptr(pOThunk.AddressOfData)
-
-				pImpByName := to[*IMAGE_IMPORT_BY_NAME](_addr)
-
-				var funcname = toStr(uintptr(unsafe.Pointer(&pImpByName.Name[0])))
+			for pThunk.Function != 0 && pOThunk.Function != 0 {
+				addr := mempe + uintptr(pOThunk.Function /*AddressOfData*/)
+				pImpByName := to[*IMAGE_IMPORT_BY_NAME](addr)
+				funcname := toStr(uintptr(unsafe.Pointer(&pImpByName.Name[0])))
 
 				fp, err := windows.GetProcAddress(h, funcname)
 				if err != nil {
 					return nil, err
+				} else {
+					pThunk.Function = uint64(fp)
 				}
-				pThunk = add(pThunk, j)
-				pThunk.Function = uint64(fp)
+
+				pThunk = add(pThunk, 1)
+				pOThunk = add(pOThunk, 1)
 			}
 		}
 	}
 
-	return nil, nil
+	{ // release
+
+	}
+
+	{ // get entry point
+
+		entry := mempe + uintptr(pOptHeader.AddressOfEntryPoint)
+
+		// typedef BOOL(WINAPI *DllEntryProc)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
+		r1, _, err := syscall.SyscallN(entry, mempe, DLL_PROCESS_ATTACH, 0)
+		if err != 0 || r1 == 0 {
+			return nil, fmt.Errorf("dll prcess attach failed, %s", err)
+
+		}
+
+		return &windows.DLL{
+			Name:   "memory module",
+			Handle: windows.Handle(mempe),
+		}, nil
+	}
 }
 
-func CopyMemory(dst, src uintptr, size int) {
+func memcpy(dst, src uintptr, size int) {
 	var sdst = struct {
 		array uintptr
 		len   int
@@ -174,24 +195,26 @@ func CopyMemory(dst, src uintptr, size int) {
 		cap:   size,
 	}
 	n := copy(*(*[]byte)(unsafe.Pointer(&sdst)), *(*[]byte)(unsafe.Pointer(&ssrc)))
-	println(n)
+	if n != size {
+		panic("memory copy failed")
+	}
 }
 
 type pLiteral interface {
-	*byte | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_BASE_RELOCATION | *DWORD | *IMAGE_IMPORT_DESCRIPTOR | *IMAGE_THUNK_DATA | *IMAGE_IMPORT_BY_NAME
+	*byte | *IMAGE_DOS_HEADER | *IMAGE_NT_HEADERS | *IMAGE_SECTION_HEADER | *IMAGE_BASE_RELOCATION | *DWORD | *IMAGE_IMPORT_DESCRIPTOR | *IMAGE_THUNK_DATA | *IMAGE_IMPORT_BY_NAME | *IMAGE_TLS_DIRECTORY
 }
 
 type Literal interface {
-	IMAGE_DOS_HEADER | IMAGE_NT_HEADERS | IMAGE_BASE_RELOCATION | IMAGE_IMPORT_DESCRIPTOR | IMAGE_THUNK_DATA
+	IMAGE_DOS_HEADER | IMAGE_NT_HEADERS | IMAGE_SECTION_HEADER | IMAGE_BASE_RELOCATION | IMAGE_IMPORT_DESCRIPTOR | IMAGE_THUNK_DATA
 }
 
 func to[T pLiteral](p uintptr) T {
 	return (T)(unsafe.Add(nil, p))
 }
 
-func add[T Literal](p *T, n int) *T {
+func add[T Literal](p *T, step int) *T {
 	s := unsafe.Sizeof(*p)
-	return (*T)(unsafe.Add(unsafe.Pointer(p), s*uintptr(n)))
+	return (*T)(unsafe.Add(unsafe.Pointer(p), s*uintptr(step)))
 }
 
 func toStr(p uintptr) string {

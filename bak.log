@@ -1,0 +1,20 @@
+	{ // tls execute
+		var pImpEntry = pOptHeader.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_TLS]
+
+		tls := to[*IMAGE_TLS_DIRECTORY](mempe + uintptr(pImpEntry.VirtualAddress))
+		pCallback := uintptr(tls.AddressOfCallBacks)
+		for pCallback != 0 {
+			pc := (*uintptr)(unsafe.Add(nil, pCallback))
+			if pc == nil {
+				break
+			}
+
+			// func(DllHandle PVOID, Reason DWORD, Reserved PVOID)
+			_, _, err := syscall.SyscallN(*pc, DLL_PROCESS_ATTACH, 0)
+			if err != 0 {
+				panic(err.Error())
+			}
+
+			pCallback += unsafe.Sizeof(uintptr(0))
+		}
+	}

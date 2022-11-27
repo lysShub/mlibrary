@@ -2,6 +2,8 @@ package mlibrary
 
 import "debug/pe"
 
+const DLL_PROCESS_ATTACH = 1
+
 type (
 	WORD      = uint16
 	LONG      = int32
@@ -38,6 +40,23 @@ type IMAGE_NT_HEADERS struct {
 	OptionalHeader pe.OptionalHeader64
 }
 
+const IMAGE_SIZEOF_SHORT_NAME = 8
+
+type IMAGE_SECTION_HEADER struct {
+	Name [IMAGE_SIZEOF_SHORT_NAME]BYTE
+
+	Misc DWORD
+
+	VirtualAddress       DWORD
+	SizeOfRawData        DWORD
+	PointerToRawData     DWORD
+	PointerToRelocations DWORD
+	PointerToLinenumbers DWORD
+	NumberOfRelocations  WORD
+	NumberOfLinenumbers  WORD
+	Characteristics      DWORD
+}
+
 type IMAGE_BASE_RELOCATION struct {
 	VirtualAddress DWORD
 	SizeOfBlock    DWORD
@@ -52,13 +71,26 @@ type IMAGE_IMPORT_DESCRIPTOR struct {
 }
 
 type IMAGE_THUNK_DATA struct {
-	ForwarderString ULONGLONG
-	Function        ULONGLONG
-	Ordinal         ULONGLONG
-	AddressOfData   ULONGLONG
+	// ForwarderString
+	Function ULONGLONG
+	// Ordinal
+	// AddressOfData
 }
 
 type IMAGE_IMPORT_BY_NAME struct {
 	Hint WORD
 	Name [1]BYTE
+}
+
+type IMAGE_TLS_DIRECTORY struct {
+	StartAddressOfRawData ULONGLONG
+	EndAddressOfRawData   ULONGLONG
+	AddressOfIndex        ULONGLONG // PDWORD
+	AddressOfCallBacks    ULONGLONG // PIMAGE_TLS_CALLBACK *;
+	SizeOfZeroFill        DWORD
+
+	// Reserved0[0 :20]
+	// Alignment[20:24]
+	// Reserved1[24:32]
+	Characteristics DWORD
 }
